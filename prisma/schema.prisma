@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Identity (demo-grade authentication — see docs/reliability.md § Auth)
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ORGANIZER
+  MEMBER
+}
+
+model Member {
+  id                  String               @id
+  displayName         String
+  notificationAddress String
+  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
+  registrations       Registration[]
+  notificationEvents  NotificationEvent[]
+  demoIdentity        DemoIdentity?
+}
+
+/// Maps configured demo bearer tokens to roles/members.
+/// Tokens come from env (ORGANIZER_TOKEN / MEMBER_TOKENS) at seed time.
+model DemoIdentity {
+  token    String   @id
+  label    String
+  role     Role
+  memberId String?  @unique
+  member   Member?  @relation(fields: [memberId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Core business state
+// ---------------------------------------------------------------------------
+
+enum WorkshopStatus {
+  ACTIVE
+  CANCELLED
+}
+
+model Workshop {
+  id            String         @id
+  title         String
+  description   String?
+  scheduledAt   DateTime       @db.Timestamptz(3)
+  status        WorkshopStatus
+  createdBy     String
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  cancelledAt   DateTime?      @db.Timestamptz(3)
+  registrations Registration[]
+  events        NotificationEvent[]
+
+  @@index([status, scheduledAt])
+}
+
+model Registration {
+  id         String   @id
+  workshopId String
+  memberId   String
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  workshop   Workshop @relation(fields: [workshopId], references: [id])
+  member     Member   @relation(fields: [memberId], references: [id])
+  events     NotificationEvent[]
+
+  // OFF-01: one registration per member per workshop, enforced by the database.
+  @@unique([workshopId, memberId])
+  @@index([memberId])
+}
+
+// ---------------------------------------------------------------------------
+// Transactional outbox
+// ---------------------------------------------------------------------------
+
+enum NotificationEventType {
+  REGISTRATION_CONFIRMED
+  WORKSHOP_CANCELLED
+}
+
+enum NotificationEventStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  NEEDS_ATTENTION
+}
+
+model NotificationEvent {
+  // Event id doubles as the receiver idempotency key.
+  id             String                  @id
+  dedupeKey      String                  @unique
+  type           NotificationEventType
+  recipientId    String
+  workshopId     String
+  registrationId String?
+  // Versioned payload snapshot; later edits never change queued meaning.
+  payload        Json
+  status         NotificationEventStatus
+  attemptCount   Int                     @default(0)
+  nextAttemptAt  DateTime                @db.Timestamptz(3)
+  leaseUntil     DateTime?               @db.Timestamptz(3)
+  leaseToken     String?
+  lastError      String?
+  createdAt      DateTime                @default(now()) @db.Timestamptz(3)
+  deliveredAt    DateTime?               @db.Timestamptz(3)
+  recipient      Member                  @relation(fields: [recipientId], references: [id])
+  workshop       Workshop                @relation(fields: [workshopId], references: [id])
+  registration   Registration?           @relation(fields: [registrationId], references: [id])
+  attempts       NotificationAttempt[]
+
+  // Worker claim lookups.
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseUntil])
+}
+
+enum AttemptOutcome {
+  SUCCESS
+  RETRY_SCHEDULED
+  NEEDS_ATTENTION
+  STALE_LEASE
+}
+
+model NotificationAttempt {
+  id            String         @id
+  eventId       String
+  attemptNumber Int
+  startedAt     DateTime       @db.Timestamptz(3)
+  finishedAt    DateTime?      @db.Timestamptz(3)
+  outcome       AttemptOutcome?
+  httpStatus    Int?
+  error         String?
+  event         NotificationEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, attemptNumber])
+}
+
+// ---------------------------------------------------------------------------
+// Mock service (independent of the outbox — never reads it)
+// ---------------------------------------------------------------------------
+
+model MockDeliveryReceipt {
+  idempotencyKey String   @id
+  payloadHash    String
+  payload        Json
+  receivedAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([receivedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+model WorkerHeartbeat {
+  workerId   String   @id
+  pid        Int?
+  startedAt  DateTime @db.Timestamptz(3)
+  lastSeenAt DateTime @db.Timestamptz(3)
+}

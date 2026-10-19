@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: workshop
+      POSTGRES_PASSWORD: workshop_dev_password
+      POSTGRES_DB: workshop_relay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workshop -d workshop_relay"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: sh -c "npx prisma migrate deploy && npx tsx prisma/seed.ts"
+    environment:
+      DATABASE_URL: postgresql://workshop:workshop_dev_password@postgres:5432/workshop_relay
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: npx tsx src/api/server.ts
+    environment: &app_env
+      DATABASE_URL: postgresql://workshop:workshop_dev_password@postgres:5432/workshop_relay
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+      MOCK_NOTIFICATION_URL: http://mock:4100
+      MOCK_AUTH_TOKEN: mock-service-token
+      MOCK_ADMIN_TOKEN: mock-admin-token
+      ORGANIZER_TOKEN: organizer-demo-token
+      MEMBER_TOKENS: alice:alice-demo-token,bob:bob-demo-token,carol:carol-demo-token,dave:dave-demo-token
+      ENABLE_DEMO_FAULTS: "true"
+      ENABLE_DEMO_PERSONAS: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: npx tsx src/worker/index.ts
+    environment: *app_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mock:
+    build: .
+    command: npx tsx src/mock/index.ts
+    environment: *app_env
+    ports:
+      - "4100:4100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
